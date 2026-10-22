@@ -26,6 +26,15 @@ import triton
 from triton import language as tl
 from triton.language.extra import libdevice
 
+# Support integer indexing of constexpr tuples on Triton-Ascend.
+if not hasattr(tl.constexpr, "__getitem__"):
+    def _constexpr_getitem(self, index):
+        if isinstance(index, tl.constexpr):
+            index = index.value
+        return tl.constexpr(self.value[index])
+
+    tl.constexpr.__getitem__ = _constexpr_getitem
+
 try:
     from triton import profiler as proton
 except ImportError:

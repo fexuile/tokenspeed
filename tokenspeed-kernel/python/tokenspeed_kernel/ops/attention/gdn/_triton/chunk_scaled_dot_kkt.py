@@ -38,7 +38,7 @@ from tokenspeed_kernel.platform import current_platform, pdl_enabled
         "USE_G": lambda args: args["g_cumsum"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "B"])
 def chunk_scaled_dot_kkt_fwd_kernel(
     k,
     beta,
@@ -47,6 +47,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     cu_seqlens,
     chunk_indices,
     T,
+    B,
     H: tl.constexpr,
     Hg: tl.constexpr,
     K: tl.constexpr,
@@ -55,6 +56,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     IS_VARLEN: tl.constexpr,
     USE_G: tl.constexpr,
     ENABLE_PDL: tl.constexpr,
+    IS_NPU: tl.constexpr,
 ):
     if ENABLE_PDL:
         tl.extra.cuda.gdc_wait()
@@ -62,6 +64,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         tl.extra.cuda.gdc_launch_dependents()
     i_t, i_bh = tl.program_id(0), tl.program_id(1)
     i_b, i_h = i_bh // H, i_bh % H
+    bt_stride = B * T
     if IS_VARLEN:
         i_n, i_t = tl.load(chunk_indices + i_t * 2).to(tl.int32), tl.load(
             chunk_indices + i_t * 2 + 1
@@ -73,9 +76,17 @@ def chunk_scaled_dot_kkt_fwd_kernel(
     else:
         bos, eos = i_b * T, i_b * T + T
     o_t = tl.arange(0, BT)
+    if IS_NPU:
+        scalar_base = i_h * bt_stride + bos
+        scalar_stride = 1
+        o_mask = o_t.to(tl.float32)
+    else:
+        scalar_base = bos * H + i_h
+        scalar_stride = H
+        o_mask = o_t
 
     p_beta = tl.make_block_ptr(
-        beta + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
+        beta + scalar_base, (T,), (scalar_stride,), (i_t * BT,), (BT,), (0,)
     )
     b_beta = tl.load(p_beta, boundary_check=(0,))
 
@@ -90,18 +101,23 @@ def chunk_scaled_dot_kkt_fwd_kernel(
             (1, 0),
         )
         b_k = tl.load(p_k, boundary_check=(0, 1))
-        b_kb = b_k * b_beta[:, None]
-        b_A += tl.dot(b_kb.to(b_k.dtype), tl.trans(b_k))
+        if IS_NPU:
+            b_A += tl.dot(b_k, tl.trans(b_k))
+        else:
+            b_kb = b_k * b_beta[:, None]
+            b_A += tl.dot(b_kb.to(b_k.dtype), tl.trans(b_k))
 
     if USE_G:
         p_g = tl.make_block_ptr(
-            g_cumsum + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
+            g_cumsum + scalar_base, (T,), (scalar_stride,), (i_t * BT,), (BT,), (0,)
         )
         b_g = tl.load(p_g, boundary_check=(0,))
         b_g_diff = b_g[:, None] - b_g[None, :]
         b_A = b_A * safe_exp(b_g_diff)
 
-    b_A = tl.where(o_t[:, None] > o_t[None, :], b_A, 0)
+    if IS_NPU:
+        b_A *= b_beta[:, None]
+    b_A = tl.where(o_mask[:, None] > o_mask[None, :], b_A, 0)
     p_A = tl.make_block_ptr(
         A + (bos * H + i_h) * BT, (T, BT), (BT * H, 1), (i_t * BT, 0), (BT, BT), (1, 0)
     )
@@ -135,11 +151,17 @@ def chunk_scaled_dot_kkt_fwd(
         output_dtype (torch.dtype):
             The dtype of the output tensor. Default: `torch.float32`
 
+    On Ascend, beta and g_cumsum are staged as contiguous [H, B, T]
+    tensors internally, while A retains the public [B, T, H, BT] layout.
+    Beta scales the FP32 dot-product result, following vLLM-Ascend; this
+    has different BF16 rounding from scaling keys before the dot product.
+
     Returns:
         beta * K * K^T of shape `[B, T, H, BT]` where `BT` is the chunk size.
     """
 
     enable_pdl = pdl_enabled()
+    is_npu = current_platform().is_npu
     B, T, Hg, K = k.shape
 
     H = beta.shape[-1]
@@ -148,6 +170,12 @@ def chunk_scaled_dot_kkt_fwd(
         prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
     )
     NT = triton.cdiv(T, BT) if cu_seqlens is None else len(chunk_indices)
+    # Follow vLLM-Ascend's KKT layout: token-contiguous scalars per head.
+    # https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/ops/triton/fla/chunk_scaled_dot_kkt.py
+    if is_npu:
+        beta = beta.permute(2, 0, 1).contiguous()
+        if g_cumsum is not None:
+            g_cumsum = g_cumsum.permute(2, 0, 1).contiguous()
     A = torch.empty(B, T, H, BT, device=k.device, dtype=output_dtype)
     chunk_scaled_dot_kkt_fwd_kernel[(NT, B * H)](
         k=k,
@@ -157,15 +185,17 @@ def chunk_scaled_dot_kkt_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         T=T,
+        B=B,
         H=H,
         Hg=Hg,
         K=K,
         BT=BT,
-        BK=64,
+        BK=128 if is_npu else 64,
         # gfx950: four waves are faster than eight.
         num_warps=4 if current_platform().is_cdna4 else 8,
         num_stages=3,
         ENABLE_PDL=enable_pdl,
+        IS_NPU=is_npu,
         **({"launch_pdl": True} if enable_pdl else {}),
     )
     return A

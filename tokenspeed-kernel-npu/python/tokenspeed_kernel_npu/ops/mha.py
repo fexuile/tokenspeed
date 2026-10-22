@@ -82,6 +82,23 @@ def mha_prefill(
         sinks=sinks,
         return_lse=return_lse,
     )
+    # FIA's TND path only accepts these head dimensions on the validated A2/A3 stack.
+    # Use the dense fusion op for larger heads, as in vLLM-Ascend's prefill path.
+    if q.shape[-1] not in (64, 128, 192):
+        return torch_npu.npu_fusion_attention(
+            q,
+            k,
+            v,
+            head_num=q.shape[1],
+            input_layout="TND",
+            atten_mask=_causal_mask(q.device),
+            scale=_scale(q, softmax_scale),
+            keep_prob=1.0,
+            actual_seq_qlen=cu_seqlens_cpu[1:],
+            actual_seq_kvlen=cu_seqlens_cpu[1:],
+            sparse_mode=2,
+        )[0]
+
     output, _ = torch_npu.npu_fused_infer_attention_score(
         q,
         k,

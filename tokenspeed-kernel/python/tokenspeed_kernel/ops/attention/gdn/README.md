@@ -55,3 +55,11 @@ masked during loading. Aligned state accesses are vectorized, with fallbacks
 for unaligned rows and arbitrary row strides. Batch size, window length, and
 payload layer stride remain runtime scalars, so serving shape changes reuse
 the compiled kernel.
+
+## Ascend chunk output layout
+
+The Ascend Triton chunk-output kernel stages cumulative gates as contiguous
+`[H, B, T]` tensors and uses FP32 causal-index comparisons, following the
+vLLM-Ascend chunk-output implementation. The chunk size and output/state
+contracts stay the same. The original total `B*T` is retained before applying
+variable-length sequence bounds so each head reads the correct gate segment.

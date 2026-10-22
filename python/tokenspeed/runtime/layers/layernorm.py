@@ -274,6 +274,20 @@ class GemmaRMSNorm(torch.nn.Module):
             else:
                 return x
 
+        if _platform.is_npu:
+            # Gemma uses 1 + weight; keep the offset in FP32.
+            orig_dtype = x.dtype
+            if residual is not None:
+                x = x + residual
+                residual = x
+            
+            x = x.float()
+            variance = x.pow(2).mean(dim=-1, keepdim=True)
+            x = x * torch.rsqrt(variance + self.variance_epsilon)
+            x = x * (1.0 + self.weight.float())
+            x = x.to(orig_dtype)
+            return x if residual is None else (x, residual)
+
         if _is_amd:
             if x.shape[0] == 0:
                 if residual is not None:
@@ -316,7 +330,8 @@ class GemmaRMSNorm(torch.nn.Module):
         """``forward(x, residual)``, plus the normed rows in static FP8 when ``fp8_scale`` is given.
 
         Returns the normed rows, their FP8 copy or ``None`` where it is not
-        made (AMD), and the updated residual.
+        made (AMD), and the updated residual. Ascend supports only
+        ``fp8_scale=None`` and raises for a quantized copy.
         """
         x, x_fp8, _, residual = self._add_norm(
             x, residual, fp8_scale=fp8_scale, fp4_scale=None
@@ -334,6 +349,7 @@ class GemmaRMSNorm(torch.nn.Module):
         Returns the normed rows, their NVFP4 ``(values, scales)`` or ``None``
         where the copy cannot equal ``fp4_quantize``'s (see
         ``nvfp4_copy_supported``) or rows are not BF16, and the updated residual.
+        Ascend supports only ``fp4_scale=None``.
         """
         x, _, x_fp4, residual = self._add_norm(
             x, residual, fp8_scale=None, fp4_scale=fp4_scale
@@ -353,7 +369,7 @@ class GemmaRMSNorm(torch.nn.Module):
         tuple[torch.Tensor, torch.Tensor] | None,
         torch.Tensor,
     ]:
-        if _is_amd:
+        if _is_amd or _platform.is_npu:
             x, residual = self(x, residual)
             return x, None, None, residual
         # The NVFP4 linear's prequantized path returns BF16 whatever the model dtype.

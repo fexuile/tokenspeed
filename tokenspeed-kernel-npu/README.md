@@ -7,6 +7,13 @@ AMD package layout and keeps the TokenSpeed runtime vendor-neutral.
 The initial Ascend path provides paged MHA, RMSNorm, Q/K RMSNorm, rotary
 embedding, and the Triton-Ascend import adapter required by CANN 9.0.0.
 
+Uncached causal prefill uses FIA for TND head dimensions 64, 128, and 192.
+Other head dimensions, including Qwen3.5's 256, use `npu_fusion_attention`
+with the same cumulative sequence boundaries, GQA inputs, and causal mask.
+The large-head path is validated in eager execution. The existing
+`test/test_mha.py::test_mha_prefill` compares 64- and 256-dimensional
+variable-length prefill against an independent attention calculation.
+
 For development from this repository:
 
 ```bash

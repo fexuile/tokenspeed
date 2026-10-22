@@ -38,7 +38,7 @@ from tokenspeed_kernel.platform import current_platform, pdl_enabled
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
     }
 )
-@triton.jit(do_not_specialize=["T"])
+@triton.jit(do_not_specialize=["T", "B"])
 def chunk_fwd_kernel_o(
     q,
     k,
@@ -50,6 +50,7 @@ def chunk_fwd_kernel_o(
     chunk_indices,
     scale,
     T,
+    B,
     H: tl.constexpr,
     Hg: tl.constexpr,
     K: tl.constexpr,
@@ -60,6 +61,7 @@ def chunk_fwd_kernel_o(
     USE_G: tl.constexpr,
     IS_VARLEN: tl.constexpr,
     ENABLE_PDL: tl.constexpr,
+    IS_NPU: tl.constexpr,
 ):
     if ENABLE_PDL:
         tl.extra.cuda.gdc_wait()
@@ -67,6 +69,7 @@ def chunk_fwd_kernel_o(
         tl.extra.cuda.gdc_launch_dependents()
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_b, i_h = i_bh // H, i_bh % H
+    bt_stride = B * T
 
     if IS_VARLEN:
         i_tg = i_t
@@ -118,13 +121,19 @@ def chunk_fwd_kernel_o(
         b_A += tl.dot(b_q, b_k)
 
     if USE_G:
-        g += bos * H + i_h
-        p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
-        b_g = tl.load(p_g, boundary_check=(0,), padding_option="zero")
+        if IS_NPU:
+            offsets = i_t * BT + tl.arange(0, BT)
+            b_g = tl.load(g + i_h * bt_stride + bos + offsets, mask=offsets < T, other=0.0)
+        else:
+            g += bos * H + i_h
+            p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
+            b_g = tl.load(p_g, boundary_check=(0,), padding_option="zero")
         b_o = b_o * exp(b_g)[:, None]
         b_A = b_A * safe_exp(b_g[:, None] - b_g[None, :])
 
     o_i = tl.arange(0, BT)
+    if IS_NPU:
+        o_i = o_i.to(tl.float32)
     m_A = o_i[:, None] >= o_i[None, :]
     b_A = tl.where(m_A, b_A, 0)
 
@@ -153,6 +162,7 @@ def chunk_fwd_o(
     chunk_size: int = 64,
 ) -> torch.Tensor:
     enable_pdl = pdl_enabled()
+    is_npu = current_platform().is_npu
     B, T, Hg, K, V = *q.shape, v.shape[-1]
     H = v.shape[-2]
     BT = min(chunk_size, max(16, triton.next_power_of_2(T)))
@@ -163,6 +173,9 @@ def chunk_fwd_o(
     if scale is None:
         scale = k.shape[-1] ** -0.5
 
+    # Match vLLM-Ascend: token-contiguous gate loads avoid strided UB layouts.
+    if is_npu and g is not None:
+        g = g.permute(2, 0, 1).contiguous()
     o = torch.empty_like(v)
 
     def grid(meta):
@@ -179,6 +192,7 @@ def chunk_fwd_o(
         chunk_indices,
         scale,
         T=T,
+        B=B,
         H=H,
         Hg=Hg,
         K=K,
@@ -186,10 +200,11 @@ def chunk_fwd_o(
         BT=BT,
         BK=128,
         # gfx950: one 128-wide V tile reads each chunk state once.
-        BV=128 if current_platform().is_cdna4 else 64,
+        BV=128 if is_npu or current_platform().is_cdna4 else 64,
         num_warps=4,
         num_stages=2,
         ENABLE_PDL=enable_pdl,
+        IS_NPU=is_npu,
         **({"launch_pdl": True} if enable_pdl else {}),
     )
     return o
