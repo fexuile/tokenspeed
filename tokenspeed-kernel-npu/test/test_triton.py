@@ -28,6 +28,12 @@ def test_triton_adapter_allows_optional_modules_to_be_missing(monkeypatch) -> No
     triton = ModuleType("triton")
     triton.jit = lambda function: function
     language = ModuleType("triton.language")
+
+    class Constexpr:
+        def __init__(self, value):
+            self.value = value
+
+    language.constexpr = Constexpr
     language.extra = SimpleNamespace()
     triton.language = language
     extra = ModuleType("triton.language.extra")
@@ -45,3 +51,7 @@ def test_triton_adapter_allows_optional_modules_to_be_missing(monkeypatch) -> No
     assert module.proton is None
     assert module.tl.extra.cuda.gdc_wait is module._unsupported_pdl_noop
     assert module.tl.extra.cuda.gdc_launch_dependents is module._unsupported_pdl_noop
+
+    values = language.constexpr((3, 5))
+    assert values[0].value == 3
+    assert values[language.constexpr(1)].value == 5
