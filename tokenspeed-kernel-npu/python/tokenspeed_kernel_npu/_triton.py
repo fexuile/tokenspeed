@@ -28,6 +28,7 @@ from triton.language.extra import libdevice
 
 # Support integer indexing of constexpr tuples on Triton-Ascend.
 if not hasattr(tl.constexpr, "__getitem__"):
+
     def _constexpr_getitem(self, index):
         if isinstance(index, tl.constexpr):
             index = index.value

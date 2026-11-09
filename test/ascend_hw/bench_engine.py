@@ -78,6 +78,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=["benchmark", "memory"])
     parser.add_argument("--model", default=default_model())
+    parser.add_argument("--tp", type=int, choices=(1, 2), required=True)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--input-lengths", type=int, nargs="+", default=[128, 2048])
     parser.add_argument("--output-lengths", type=int, nargs="+", default=[32, 128])
@@ -104,7 +105,11 @@ def main():
         model=args.model,
         device="npu",
         dtype="bfloat16",
-        world_size=1,
+        world_size=args.tp,
+        attn_tp_size=args.tp,
+        dense_tp_size=args.tp,
+        lm_head_tp_size=args.tp,
+        data_parallel_size=1,
         language_model_only=True,
         skip_tokenizer_init=True,
         kv_cache_dtype="auto",

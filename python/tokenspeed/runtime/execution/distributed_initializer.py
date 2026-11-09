@@ -253,6 +253,11 @@ class DistributedInitializer:
         mapping = config.mapping
         logger.info(
             f"Current Process distributed state:  global rank: {mapping.rank!s}  "
+            f"local_rank: {config.local_rank} device: {config.device}:{config.gpu_id} "
+            f"attn_tp_group: {mapping.attn.tp_group} "
+            f"dense_tp_group: {mapping.dense.tp_group} "
+            f"linear_attn_tp_group: {mapping.linear_attn.tp_group} "
+            f"lm_head_tp_group: {mapping.lm_head.tp_group} "
             f"attn_tp_rank: {mapping.attn.tp_rank!s}  attn_dp_rank: "
             f"{mapping.attn.dp_rank!s}",
         )

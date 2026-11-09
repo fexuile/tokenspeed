@@ -1041,7 +1041,7 @@ class EventLoop:
         self._dp_local_info[0, 3] = (
             batch_size - forward_op.num_extends() if executes_model_forward else 0
         )
-        dist.all_gather_single(
+        dist.all_gather_into_tensor(
             self._dp_global_info,
             self._dp_local_info,
             group=self.world_cpu_group,

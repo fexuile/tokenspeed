@@ -20,6 +20,7 @@
 
 """Optional Event/HBM diagnostics printed by the scheduler, without files."""
 
+import os
 import statistics
 import time
 
@@ -66,7 +67,8 @@ def install(*, enabled):
             phase = "decode"
             mean = statistics.mean(state["decode_ms"])
         print(
-            f"NPU_DIAGNOSTIC input={state['input_tokens']} phase={phase} "
+            f"NPU_DIAGNOSTIC rank={torch.distributed.get_rank()} "
+            f"pid={os.getpid()} device=npu:{torch.npu.current_device()} input={state['input_tokens']} phase={phase} "
             f"steps={count} event_mean_ms={mean:.3f} last_sync_ms={host_ms:.3f} "
             f"peak_allocated_GiB={torch.npu.max_memory_allocated()/2**30:.4f} "
             f"peak_reserved_GiB={torch.npu.max_memory_reserved()/2**30:.4f}",

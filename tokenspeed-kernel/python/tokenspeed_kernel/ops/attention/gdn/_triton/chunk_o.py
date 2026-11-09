@@ -123,7 +123,9 @@ def chunk_fwd_kernel_o(
     if USE_G:
         if IS_NPU:
             offsets = i_t * BT + tl.arange(0, BT)
-            b_g = tl.load(g + i_h * bt_stride + bos + offsets, mask=offsets < T, other=0.0)
+            b_g = tl.load(
+                g + i_h * bt_stride + bos + offsets, mask=offsets < T, other=0.0
+            )
         else:
             g += bos * H + i_h
             p_g = tl.make_block_ptr(g, (T,), (H,), (i_t * BT,), (BT,), (0,))
