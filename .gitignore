@@ -99,6 +99,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+python/uv.lock
 
 # Spyder
 .spyderproject
@@ -201,4 +202,9 @@ Testing/
 
 AGENTS.local.md
 AGENTS.override.md
+
 outputs/
+
+# AICS related
+docs/assignments/
+docs/reports/
