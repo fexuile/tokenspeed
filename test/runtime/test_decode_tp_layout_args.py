@@ -217,6 +217,7 @@ class TestServerArgs:
             # TP 1: the DP8 world runs its experts under EP.
             ep_size=8,
             numerics="rl-bitwise",
+            sampling_backend="greedy",
             attn_head_tp_size=8,
             disaggregation_mode="decode",
         )

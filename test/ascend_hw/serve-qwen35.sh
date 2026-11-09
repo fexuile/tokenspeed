@@ -20,32 +20,55 @@
 # SOFTWARE.
 
 set -eo pipefail
+if [[ $# != 4 ]]; then
+    echo "Usage: bash serve-qwen35.sh <model-path> <1|2> <physical-chip-ids> <enabled|disabled>" >&2
+    exit 2
+fi
+MODEL="$1"
+TP="$2"
+CHIPS="$3"
+PREFIX_CACHE="$4"
+if [[ "$PREFIX_CACHE" != enabled && "$PREFIX_CACHE" != disabled ]]; then
+    echo "Select prefix caching explicitly: enabled or disabled" >&2
+    exit 2
+fi
+if [[ ! "$TP" =~ ^[12]$ || ! "$CHIPS" =~ ^[0-9]+(,[0-9]+)?$ ]]; then
+    echo "Expected TP=1 or 2 and a comma-separated physical chip list" >&2
+    exit 2
+fi
+IFS=, read -ra CHIP_IDS <<< "$CHIPS"
+if [[ ${#CHIP_IDS[@]} != "$TP" || ( "$TP" == 2 && "${CHIP_IDS[0]}" == "${CHIP_IDS[1]}" ) ]]; then
+    echo "Select exactly TP distinct physical chips" >&2
+    exit 2
+fi
 export REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-source "${PYTHON_VENV:-$HOME/tokenspeed/.venv}/bin/activate"
+if [[ -n "${PYTHON_VENV:-}" ]]; then
+    source "$PYTHON_VENV/bin/activate"
+fi
 source /usr/local/Ascend/cann-9.0.0/set_env.sh
-cd "$REPO_ROOT/test/ascend_hw"
-export PYTHONPATH="$REPO_ROOT/python:$REPO_ROOT/tokenspeed-kernel/python:$REPO_ROOT/tokenspeed-kernel-npu/python"
+export PYTHONPATH="$REPO_ROOT/python:$REPO_ROOT/tokenspeed-kernel/python:$REPO_ROOT/tokenspeed-kernel-npu/python${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONDONTWRITEBYTECODE=1
 export TOKENSPEED_KERNEL_BACKEND=npu
-export ASCEND_RT_VISIBLE_DEVICES="${NPU_CHIP_ID:-6}"
+export ASCEND_RT_VISIBLE_DEVICES="$CHIPS"
 export OMP_NUM_THREADS=8
 export TOKENIZERS_PARALLELISM=false
-python - <<'PY'
-import os
-from pathlib import Path
-import tokenspeed, tokenspeed_kernel, tokenspeed_kernel_npu
-repo = Path(os.environ["REPO_ROOT"]).resolve()
-for module in (tokenspeed, tokenspeed_kernel, tokenspeed_kernel_npu):
-    print(module.__name__, module.__file__, flush=True)
-    assert Path(module.__file__).resolve().is_relative_to(repo)
-PY
-exec python -B -m tokenspeed.cli serve "$HOME/models/Qwen3.5-0.8B" \
-    --served-model-name qwen3.5-0.8b \
-    --device npu --dtype bfloat16 --world-size 1 --language-model-only \
-    --kv-cache-dtype auto --attention-backend mha --sampling-backend greedy \
-    --mamba-ssm-dtype float32 --enforce-eager --disable-prefill-graph \
-    --disable-pdl --disable-autotune --disable-prefix-caching --disable-kvstore \
-    --retraction-snapshot-ratio 0 \
-    --max-model-len 4096 --max-num-seqs 2 --max-total-tokens 8192 \
-    --chunked-prefill-size 4096 --prefix-granularity 128 \
-    --host 127.0.0.1 --port "${SERVER_PORT:-31905}"
+python "$REPO_ROOT/test/ascend_hw/tp_validation.py" inspect --model "$MODEL" --tp "$TP"
+npu-smi info
+command=(python -B -m tokenspeed.cli serve "$MODEL"
+    --device npu --dtype bfloat16 --world-size "$TP" --attn-tp-size "$TP"
+    --dense-tp-size "$TP" --lm-head-tp-size "$TP" --data-parallel-size 1
+    --language-model-only --kv-cache-dtype auto --attention-backend mha
+    --sampling-backend greedy --mamba-ssm-dtype float32 --enforce-eager
+    --disable-prefill-graph --disable-pdl --disable-autotune
+    --disable-kvstore --retraction-snapshot-ratio 0
+    --max-model-len 4096 --max-num-seqs 2 --max-total-tokens "${MAX_TOTAL_TOKENS:-16384}"
+    --chunked-prefill-size 4096 --prefix-granularity 128
+    --host 127.0.0.1 --port "${SERVER_PORT:-31905}")
+if [[ "$PREFIX_CACHE" == disabled ]]; then
+    command+=(--disable-prefix-caching)
+else
+    command+=(--enable-prefix-caching)
+fi
+printf 'LAUNCH %q ' "${command[@]}"
+printf '\n'
+exec "${command[@]}"
