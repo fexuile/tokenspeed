@@ -41,6 +41,7 @@ from tokenspeed_kernel.ops.communication.trtllm import (
 )
 from tokenspeed_kernel.ops.layernorm import (
     add_rmsnorm,
+    grouped_gemma_rmsnorm,
     nvfp4_copy_supported,
     rmsnorm,
 )
@@ -274,30 +275,18 @@ class GemmaRMSNorm(torch.nn.Module):
             else:
                 return x
 
-        if _platform.is_npu:
-            # Gemma uses 1 + weight; keep the offset in FP32.
+        if _is_amd or _platform.is_npu:
             orig_dtype = x.dtype
             if residual is not None:
                 x = x + residual
                 residual = x
-            
-            x = x.float()
-            variance = x.pow(2).mean(dim=-1, keepdim=True)
-            x = x * torch.rsqrt(variance + self.variance_epsilon)
-            x = x * (1.0 + self.weight.float())
-            x = x.to(orig_dtype)
-            return x if residual is None else (x, residual)
 
-        if _is_amd:
-            if x.shape[0] == 0:
-                if residual is not None:
-                    return x, residual
-                else:
-                    return x
-            orig_dtype = x.dtype
-            if residual is not None:
-                x = x + residual
-                residual = x
+            if _platform.is_npu and x.device.type == "npu":
+                # A fixed reduction per row keeps decode independent of batch size.
+                out = grouped_gemma_rmsnorm(
+                    x, self.weight, x.shape[-1], self.variance_epsilon, out=None
+                )
+                return out if residual is None else (out, residual)
 
             x = x.float()
             variance = x.pow(2).mean(dim=-1, keepdim=True)

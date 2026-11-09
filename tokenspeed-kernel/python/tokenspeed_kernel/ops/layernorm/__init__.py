@@ -139,7 +139,7 @@ def grouped_gemma_rmsnorm(
     """Apply Gemma RMSNorm independently to last-dimension groups.
 
     Args:
-        x: GPU input shaped ``[..., width]``.
+        x: GPU or Ascend input shaped ``[..., width]``.
         weight: Gemma checkpoint weight offset shaped ``[width]``; the
             effective multiplier is ``1 + weight``.
         group_size: Elements sharing one variance statistic. ``None`` means
@@ -150,8 +150,8 @@ def grouped_gemma_rmsnorm(
     Returns:
         Normalized tensor matching ``x`` shape and dtype.
     """
-    if not x.is_cuda:
-        raise ValueError("grouped_gemma_rmsnorm requires GPU tensors")
+    if x.device.type not in {"cuda", "npu"}:
+        raise ValueError("grouped_gemma_rmsnorm requires GPU or Ascend tensors")
     width = int(x.shape[-1])
     effective_group_size = width if group_size is None else int(group_size)
     return _grouped_gemma_rmsnorm(x, weight, effective_group_size, eps, out=out)
