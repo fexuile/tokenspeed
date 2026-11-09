@@ -21,10 +21,15 @@
 """Behavioral checks for the in-memory comparison and latency helpers."""
 
 import copy
+import sys
+from pathlib import Path
 
 import pytest
-from bench_engine import measure_stream, summarize_runs
-from model_checks import compare_results
+
+_AICS_ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(_AICS_ROOT.parent))
+from aics.common.bench_engine import measure_stream, summarize_runs
+from aics.common.model_checks import compare_results
 
 
 def cases():

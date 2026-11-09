@@ -41,7 +41,7 @@ if [[ ${#CHIP_IDS[@]} != "$TP" || ( "$TP" == 2 && "${CHIP_IDS[0]}" == "${CHIP_ID
     echo "Select exactly TP distinct physical chips" >&2
     exit 2
 fi
-export REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+export REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
 if [[ -n "${PYTHON_VENV:-}" ]]; then
     source "$PYTHON_VENV/bin/activate"
 fi
@@ -52,7 +52,7 @@ export TOKENSPEED_KERNEL_BACKEND=npu
 export ASCEND_RT_VISIBLE_DEVICES="$CHIPS"
 export OMP_NUM_THREADS=8
 export TOKENIZERS_PARALLELISM=false
-python "$REPO_ROOT/test/ascend_hw/tp_validation.py" inspect --model "$MODEL" --tp "$TP"
+python "$REPO_ROOT/test/aics/hw2/tp_validation.py" inspect --model "$MODEL" --tp "$TP"
 npu-smi info
 command=(python -B -m tokenspeed.cli serve "$MODEL"
     --device npu --dtype bfloat16 --world-size "$TP" --attn-tp-size "$TP"

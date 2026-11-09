@@ -31,7 +31,10 @@ from pathlib import Path
 
 # Spawned workers import this module again; forked workers inherit the hook.
 if os.environ.get("TOKENSPEED_TP_BATCH_CAPTURE"):
-    from batch_capture import install
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from aics.hw2.batch_capture import install
 
     install(os.environ["TOKENSPEED_TP_BATCH_CAPTURE"])
 
@@ -222,7 +225,7 @@ def inspect(model, *, tp):
 
     import tokenspeed
 
-    root = Path(__file__).resolve().parents[2]
+    root = Path(__file__).resolve().parents[3]
     for module in (tokenspeed, tokenspeed_kernel, tokenspeed_kernel_npu):
         origin = Path(module.__file__).resolve()
         if not origin.is_relative_to(root):

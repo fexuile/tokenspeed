@@ -25,10 +25,12 @@ import os
 import statistics
 import sys
 import time
+from pathlib import Path
 
 sys.dont_write_bytecode = True
-from measure_hooks import install
-from model_checks import default_model
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from aics.common.measure_hooks import install
+from aics.common.model_checks import default_model
 
 install(
     enabled=os.environ.get("FORWARD_DIAGNOSTICS") == "1" and sys.argv[1:2] == ["memory"]
@@ -82,6 +84,7 @@ def main():
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--input-lengths", type=int, nargs="+", default=[128, 2048])
     parser.add_argument("--output-lengths", type=int, nargs="+", default=[32, 128])
+    parser.add_argument("--max-total-tokens", type=int, default=8192)
     args = parser.parse_args()
     if args.repeats < 1 or min(args.input_lengths) < 1 or min(args.output_lengths) < 2:
         parser.error(
@@ -89,6 +92,8 @@ def main():
         )
     if max(args.input_lengths) + max(args.output_lengths) > 4096:
         parser.error("Input plus output length must fit max_model_len=4096")
+    if args.max_total_tokens < max(args.input_lengths) + max(args.output_lengths):
+        parser.error("max-total-tokens must fit the requested input and output lengths")
     os.environ["FORWARD_DIAGNOSTICS"] = "1" if args.mode == "memory" else "0"
     install(enabled=args.mode == "memory")
 
@@ -126,7 +131,7 @@ def main():
         seed=0,
         max_model_len=4096,
         max_num_seqs=2,
-        max_total_tokens=8192,
+        max_total_tokens=args.max_total_tokens,
         chunked_prefill_size=4096,
         prefix_granularity=128,
         log_level="warning",

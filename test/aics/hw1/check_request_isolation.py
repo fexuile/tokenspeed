@@ -18,15 +18,16 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""Print model reference, service output, or in-memory comparison."""
+"""Check interleaved/concurrent requests against references held in memory."""
 
 import argparse
-import json
+import concurrent.futures
 import sys
+from pathlib import Path
 
 sys.dont_write_bytecode = True
-from model_checks import (
-    compare_results,
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from aics.common.model_checks import (
     default_model,
     prepare_cases,
     print_case,
@@ -37,26 +38,28 @@ from model_checks import (
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=["reference", "server", "compare"])
     parser.add_argument("--model", default=default_model())
     parser.add_argument("--url", default="http://127.0.0.1:31905")
     parser.add_argument("--served-model", default="qwen3.5-0.8b")
     args = parser.parse_args()
     tokenizer, cases = prepare_cases(args.model)
-    reference = None
-    if args.mode in ("reference", "compare"):
-        reference = reference_results(args.model, tokenizer, cases)
-    if args.mode in ("server", "compare"):
-        actual = []
-        for case in cases:
-            row = server_result(case, args.url, args.served_model)
-            actual.append(row)
-            print_case("SERVER", row)
-        if args.mode == "compare":
-            result = compare_results(actual, reference)
-            print(json.dumps(result, ensure_ascii=False, indent=2), flush=True)
-            assert result["passed"], "Model comparison failed; see terminal output"
-            print(f"PASS {len(cases)}/{len(cases)} model comparisons", flush=True)
+    expected = reference_results(args.model, tokenizer, cases)
+    rows = []
+
+    def request(index):
+        return server_result(cases[index], args.url, args.served_model)
+
+    for indices in ([0, 1], [2, 3], [0, 1]):
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            rows.extend(executor.map(request, indices))
+    rows.append(request(0))
+    for row in rows:
+        passed = row["text"] == expected[row["index"]]["text"]
+        print_case("ISOLATION", row)
+        print(f"case={row['index']} exact_reference_text={passed}", flush=True)
+    passed = sum(row["text"] == expected[row["index"]]["text"] for row in rows)
+    print(f"ISOLATION {passed}/{len(rows)} passed", flush=True)
+    assert passed == len(rows), "Request isolation comparison failed"
 
 
 if __name__ == "__main__":

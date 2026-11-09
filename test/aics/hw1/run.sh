@@ -24,13 +24,13 @@ if [[ $# -lt 2 ]]; then
     echo "Usage: PYTHON_VENV=/path/to/venv bash run.sh <modules|regression|unit|reference|server|compare|requests|benchmark|memory> <physical-chip-id> [test-options]"
     exit 2
 fi
-REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
-TEST_ROOT="$REPO_ROOT/test/ascend_hw"
+REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../.." && pwd)"
+TEST_ROOT="$REPO_ROOT/test/aics/hw1"
 : "${PYTHON_VENV:?Set PYTHON_VENV to an existing Ascend Python environment}"
 source "${PYTHON_VENV}/bin/activate"
 source /usr/local/Ascend/cann-9.0.0/set_env.sh
 cd "$TEST_ROOT"
-export PYTHONPATH="$REPO_ROOT/python:$REPO_ROOT/tokenspeed-kernel/python:$REPO_ROOT/tokenspeed-kernel-npu/python"
+export PYTHONPATH="$REPO_ROOT/test:$REPO_ROOT/python:$REPO_ROOT/tokenspeed-kernel/python:$REPO_ROOT/tokenspeed-kernel-npu/python"
 export ASCEND_RT_VISIBLE_DEVICES="$2"
 export TOKENSPEED_KERNEL_BACKEND=npu
 export PYTHONDONTWRITEBYTECODE=1
@@ -44,11 +44,11 @@ case "$TASK" in
         if [[ $# -ne 0 ]]; then echo "Unexpected options for $TASK: $*" >&2; exit 2; fi
         case "$TASK" in
             modules) python -B "$TEST_ROOT/check_modules.py" ;;
-            unit) python -B -m pytest -q -p no:cacheprovider "$TEST_ROOT/test_console_helpers.py" ;;
+            unit) python -B -m pytest -q -p no:cacheprovider "$REPO_ROOT/test/aics/test_console_helpers.py" ;;
             regression) python -B -m pytest -q -p no:cacheprovider "$REPO_ROOT/tokenspeed-kernel-npu/test/test_mha.py" "$REPO_ROOT/tokenspeed-kernel-npu/test/test_layernorm.py" "$REPO_ROOT/tokenspeed-kernel-npu/test/test_rotary_embedding.py" "$REPO_ROOT/tokenspeed-kernel-npu/test/test_triton.py" ;;
         esac ;;
     reference|server|compare) python -B "$TEST_ROOT/verify-qwen35.py" "$TASK" "$@" ;;
     requests) python -B "$TEST_ROOT/check_request_isolation.py" "$@" ;;
-    benchmark|memory) python -B "$TEST_ROOT/bench_engine.py" "$TASK" "$@" ;;
+    benchmark|memory) python -B "$REPO_ROOT/test/aics/common/bench_engine.py" "$TASK" --tp 1 "$@" ;;
     *) echo "Unknown task: $TASK" >&2; exit 2 ;;
 esac

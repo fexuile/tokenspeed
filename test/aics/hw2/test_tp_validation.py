@@ -26,7 +26,9 @@ import sys
 from pathlib import Path
 
 import pytest
-from tp_validation import (
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from aics.hw2.tp_validation import (
     checkpoint_identity,
     compare_records,
     model_geometry,
