@@ -23,6 +23,7 @@ from collections.abc import Sequence
 import torch
 
 from tokenspeed.runtime.distributed.comm_ops import (
+    all_gather,
     all_reduce,
     all_to_all_transpose,
     token_all_gather,
@@ -510,6 +511,12 @@ class CommManager:
             scattered_num_tokens=token_list,
         )
 
+    @staticmethod
+    def _combine_replicated_outputs(
+        hidden_states: torch.Tensor, group: Group
+    ) -> torch.Tensor:
+        return all_reduce(hidden_states, group)
+
     def post_attn_comm(
         self, hidden_states: torch.Tensor, residual: torch.Tensor, ctx: ForwardContext
     ):
@@ -521,7 +528,9 @@ class CommManager:
             return hidden_states, residual
 
         if self.use_all_reduce(self.is_moe):
-            hidden_states = all_reduce(hidden_states, self.mapping.attn.tp_group)
+            hidden_states = self._combine_replicated_outputs(
+                hidden_states, self.mapping.attn.tp_group
+            )
             # The output residual is expected to have attn_tp_num_tokens.
             # For first layer, the input residual has attn_tp_num_tokens.
             # Otherwise, if this layer experiences a RSAG -> AR switch, residual needs allgather.
@@ -596,7 +605,9 @@ class CommManager:
             return hidden_states, residual
 
         if self._shard(ctx) is None and self.use_all_reduce(is_moe=False):
-            hidden_states = all_reduce(hidden_states, self.mapping.dense.tp_group)
+            hidden_states = self._combine_replicated_outputs(
+                hidden_states, self.mapping.dense.tp_group
+            )
             return hidden_states, residual
         if self.dense_batch_invariant:
             # The column-parallel down_proj already reduced the whole
@@ -826,3 +837,43 @@ class CommManager:
             hidden_states, _ = self.post_final_norm_comm(hidden_states, residual, ctx)
 
         return hidden_states, residual_out
+
+
+class FullKCommManager(CommManager):
+    """Complete output-channel shards on replicated token rows.
+
+    Reuse the ordinary layer boundary path, gathering channels at its two
+    communication hooks. This layout has no partial sums to reduce or fuse.
+    """
+
+    def __init__(
+        self,
+        mapping: Mapping,
+        layer_id: int,
+        *,
+        input_layernorm: torch.nn.Module | None,
+        post_attn_layernorm: torch.nn.Module | None,
+    ) -> None:
+        super().__init__(
+            mapping,
+            layer_id,
+            is_moe=False,
+            prev_is_moe=False,
+            dense_batch_invariant=False,
+            input_layernorm=input_layernorm,
+            post_attn_layernorm=post_attn_layernorm,
+            query_sharded=False,
+        )
+        if not self.use_all_reduce(is_moe=False):
+            raise ValueError("Full-K output channels require replicated token rows")
+
+    @staticmethod
+    def _combine_replicated_outputs(
+        hidden_states: torch.Tensor, group: Group
+    ) -> torch.Tensor:
+        if hidden_states.shape[0] == 0:
+            return hidden_states.new_empty((0, hidden_states.shape[-1] * len(group)))
+        return all_gather(hidden_states, group, dim=-1)
+
+    def use_all_reduce_norm_fusion(self) -> bool:
+        return False

@@ -23,7 +23,7 @@ from tokenspeed.runtime.layers.linear import (
     RowParallelLinear,
 )
 from tokenspeed.runtime.models import qwen3_5_moe
-from tokenspeed.runtime.models.qwen3_5_moe import Qwen3_5MoeMLP
+from tokenspeed.runtime.models.qwen3_5_moe import Qwen3_5FullKMLP, Qwen3_5MoeMLP
 
 HIDDEN = 256
 INTERMEDIATE = 512
@@ -195,3 +195,75 @@ def test_dense_dp_and_deepep_shared_still_replicate(scope, replicate):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, *sys.argv[1:]]))
+
+
+@pytest.mark.parametrize("tp", [1, 2])
+def test_full_k_dense_idle_output_uses_partitioned_channels(tp):
+    from tokenspeed.runtime.distributed.comm_manager import FullKCommManager
+    from tokenspeed.runtime.execution.context import ForwardContext
+    from tokenspeed.runtime.execution.forward_batch_info import ForwardMode
+    from tokenspeed.runtime.execution.output_layout import ForwardOutputLayout
+
+    mapping = Mapping(rank=0, world_size=tp, attn_tp_size=tp, dense_tp_size=tp)
+    mlp = Qwen3_5FullKMLP(
+        hidden_size=HIDDEN,
+        intermediate_size=INTERMEDIATE,
+        hidden_act="silu",
+        mapping=mapping,
+        quant_config=None,
+        reduce_results=False,
+        parallelism="dense",
+    )
+    manager = FullKCommManager(
+        mapping, layer_id=0, input_layernorm=None, post_attn_layernorm=None
+    )
+    ctx = ForwardContext(
+        attn_backend=None,
+        token_to_kv_pool=None,
+        bs=0,
+        num_extends=0,
+        input_num_tokens=0,
+        forward_mode=ForwardMode.IDLE,
+        output_layout=ForwardOutputLayout(0, 0, 0, 1),
+    )
+    residual = torch.empty(0, HIDDEN)
+    local = mlp(residual)
+    assert local.shape == (0, HIDDEN // tp)
+    for tail in (manager.post_attn_comm, manager.post_dense_comm):
+        output, returned_residual = tail(local, residual, ctx)
+        torch.testing.assert_close(output, residual, atol=0, rtol=0)
+        assert returned_residual is residual
+
+
+def test_full_k_output_disables_partial_sum_norm_fusion(monkeypatch):
+    from tokenspeed.runtime.distributed.comm_manager import (
+        CommManager,
+        FullKCommManager,
+    )
+    from tokenspeed.runtime.utils.env import global_server_args_dict
+
+    monkeypatch.setitem(global_server_args_dict, "enable_allreduce_fusion", True)
+    mapping = Mapping(rank=0, world_size=2, attn_tp_size=2, dense_tp_size=2)
+    ordinary = CommManager(
+        mapping,
+        layer_id=0,
+        is_moe=False,
+        prev_is_moe=False,
+        dense_batch_invariant=False,
+        query_sharded=False,
+    )
+    complete = FullKCommManager(
+        mapping, layer_id=0, input_layernorm=None, post_attn_layernorm=None
+    )
+    assert ordinary.use_all_reduce_norm_fusion()
+    assert not complete.use_all_reduce_norm_fusion()
+
+
+def test_full_k_output_rejects_scattered_token_rows():
+    from tokenspeed.runtime.distributed.comm_manager import FullKCommManager
+
+    mapping = Mapping(rank=0, world_size=2, attn_tp_size=1, dense_tp_size=2)
+    with pytest.raises(ValueError, match="replicated token rows"):
+        FullKCommManager(
+            mapping, layer_id=0, input_layernorm=None, post_attn_layernorm=None
+        )

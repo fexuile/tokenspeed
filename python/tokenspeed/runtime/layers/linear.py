@@ -535,6 +535,69 @@ class ColumnParallelLinear(LinearBase):
         return s
 
 
+class FullKParallelLinear(ColumnParallelLinear):
+    """Project channel-sharded inputs into complete output-channel shards.
+
+    Every rank holds the same token rows. Gather input channels in rank order,
+    then compute each output over the full K dimension with ordinary column
+    weight sharding. CommManager gathers the output shards at the layer tail.
+    No partial projection is rounded or summed across ranks.
+
+    Args:
+        input_size: Global input-channel width, divisible by tp_size.
+        output_size: Global output-channel width, divisible by tp_size.
+        tp_rank: This rank's index in the projection group.
+        tp_size: Number of channel partitions.
+        tp_group: Global ranks in channel order; may be None at TP=1.
+        params_dtype: Weight dtype, or None for the model's default dtype.
+        prefix: Checkpoint prefix used by the ordinary column weight loader.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        *,
+        tp_rank: int,
+        tp_size: int,
+        tp_group: tuple[int, ...] | None,
+        params_dtype: torch.dtype | None,
+        prefix: str,
+    ) -> None:
+        if input_size % tp_size:
+            raise ValueError(
+                "Full-K projection needs equally partitioned input channels"
+            )
+        super().__init__(
+            input_size,
+            output_size,
+            bias=False,
+            gather_output=False,
+            params_dtype=params_dtype,
+            quant_config=None,
+            prefix=prefix,
+            tp_rank=tp_rank,
+            tp_size=tp_size,
+            tp_group=tp_group,
+        )
+
+    def forward(
+        self, input_: torch.Tensor, *, ctx: "ForwardContext | None" = None
+    ) -> tuple[torch.Tensor, None]:
+        """Return ``([rows, output_size / tp_size], None)`` for local inputs.
+
+        input_ holds this rank's ``input_size / tp_size`` channels, with the
+        same token rows on every rank. ctx is forwarded to the column linear.
+        """
+        if input_.shape[-1] != self.input_size // self.tp_size:
+            raise ValueError("Full-K projection received the wrong input-channel shard")
+        if self.tp_size > 1 and input_.shape[0] > 0:
+            input_ = all_gather(input_, self.tp_group, dim=-1)
+        elif input_.shape[0] == 0:
+            return input_.new_empty((0, self.output_size_per_partition)), None
+        return super().forward(input_, ctx=ctx)
+
+
 class MergedColumnParallelLinear(ColumnParallelLinear):
     """Packed linear layers with column parallelism.
 

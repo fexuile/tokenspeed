@@ -38,7 +38,7 @@ from tokenspeed.runtime.configs.qwen3_5_config import (
 from tokenspeed.runtime.configs.utils import get_rope_parameters
 
 # Distributed
-from tokenspeed.runtime.distributed.comm_manager import CommManager
+from tokenspeed.runtime.distributed.comm_manager import CommManager, FullKCommManager
 from tokenspeed.runtime.distributed.mapping import Mapping
 from tokenspeed.runtime.execution.context import ForwardContext
 
@@ -53,6 +53,7 @@ from tokenspeed.runtime.layers.layernorm import GemmaRMSNorm
 # Layers - Linear
 from tokenspeed.runtime.layers.linear import (
     ColumnParallelLinear,
+    FullKParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
@@ -80,6 +81,7 @@ from tokenspeed.runtime.models.base import BaseCausalLM
 from tokenspeed.runtime.models.base.decoder_layer import capture_layer_input
 from tokenspeed.runtime.models.base.transformer_model import notify_target_capture
 from tokenspeed.runtime.models.qwen3_5_moe import (
+    Qwen3_5FullKMLP,
     Qwen3_5MoeMLP,
     Qwen3_5MoeSparseMoeBlock,
 )
@@ -169,6 +171,44 @@ def _gdn_in_proj_stacked_mapping(param_names) -> list:
         ("in_proj_qkvzba.", "in_proj_b.", 4),
         ("in_proj_qkvzba.", "in_proj_a.", 5),
     ]
+
+
+def _use_full_k_outputs(
+    config: Qwen3_5TextConfig, quant_config: QuantizationConfig | None
+) -> bool:
+    return (
+        current_platform().is_npu
+        and quant_config is None
+        and config.model_type == "qwen3_5_text"
+    )
+
+
+def _make_comm_manager(
+    config: Qwen3_5TextConfig,
+    mapping: Mapping,
+    layer_id: int,
+    is_moe: bool,
+    quant_config: QuantizationConfig | None,
+    input_norm: GemmaRMSNorm,
+    post_attn_norm: GemmaRMSNorm,
+) -> CommManager:
+    if _use_full_k_outputs(config, quant_config):
+        return FullKCommManager(
+            mapping,
+            layer_id,
+            input_layernorm=input_norm,
+            post_attn_layernorm=post_attn_norm,
+        )
+    return CommManager(
+        mapping,
+        layer_id,
+        is_moe=is_moe,
+        prev_is_moe=is_moe,
+        dense_batch_invariant=False,
+        input_layernorm=input_norm,
+        post_attn_layernorm=post_attn_norm,
+        query_sharded=False,
+    )
 
 
 def _input_norm(
@@ -383,18 +423,30 @@ class Qwen3_5GatedDeltaNet(nn.Module):
         )
 
         # Output projection
-        self.out_proj = RowParallelLinear(
-            self.value_dim,
-            self.hidden_size,
-            bias=False,
-            input_is_parallel=True,
-            reduce_results=False,
-            quant_config=quant_config,
-            tp_rank=self.attn_tp_rank,
-            tp_size=self.attn_tp_size,
-            tp_group=self.attn_tp_group,
-            prefix=add_prefix("out_proj", prefix),
-        )
+        full_k_output = _use_full_k_outputs(config, quant_config)
+        if full_k_output:
+            self.out_proj = FullKParallelLinear(
+                self.value_dim,
+                self.hidden_size,
+                tp_rank=self.attn_tp_rank,
+                tp_size=self.attn_tp_size,
+                tp_group=self.attn_tp_group,
+                params_dtype=None,
+                prefix=add_prefix("out_proj", prefix),
+            )
+        else:
+            self.out_proj = RowParallelLinear(
+                self.value_dim,
+                self.hidden_size,
+                bias=False,
+                input_is_parallel=True,
+                reduce_results=False,
+                quant_config=quant_config,
+                tp_rank=self.attn_tp_rank,
+                tp_size=self.attn_tp_size,
+                tp_group=self.attn_tp_group,
+                prefix=add_prefix("out_proj", prefix),
+            )
 
     @staticmethod
     def _override_weight_loader(param, loader):
@@ -638,7 +690,12 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
             )
             is_moe = True
         elif config.model_type == "qwen3_5_text":
-            self.mlp = Qwen3_5MoeMLP(
+            mlp_cls = (
+                Qwen3_5FullKMLP
+                if _use_full_k_outputs(config, quant_config)
+                else Qwen3_5MoeMLP
+            )
+            self.mlp = mlp_cls(
                 parallelism="dense",
                 mapping=self.mapping,
                 hidden_size=config.hidden_size,
@@ -658,15 +715,14 @@ class Qwen3_5LinearDecoderLayer(nn.Module):
         )
 
         self.is_moe = is_moe
-        self.comm_manager = CommManager(
-            mapping=self.mapping,
-            layer_id=self.layer_id,
-            is_moe=is_moe,
-            prev_is_moe=is_moe,
-            dense_batch_invariant=False,
-            input_layernorm=self.input_layernorm,
-            post_attn_layernorm=self.post_attention_layernorm,
-            query_sharded=False,
+        self.comm_manager = _make_comm_manager(
+            config,
+            self.mapping,
+            self.layer_id,
+            is_moe,
+            quant_config,
+            self.input_layernorm,
+            self.post_attention_layernorm,
         )
 
     def forward(
@@ -822,17 +878,29 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
             prefix=add_prefix("qkv_proj", prefix),
         )
 
-        self.o_proj = RowParallelLinear(
-            self.total_num_heads * self.head_dim,
-            config.hidden_size,
-            bias=False,
-            quant_config=attn_quant_config,
-            reduce_results=False,
-            tp_rank=self.attn_tp_rank,
-            tp_size=self.attn_tp_size,
-            tp_group=self.attn_tp_group,
-            prefix=add_prefix("o_proj", prefix),
-        )
+        full_k_output = _use_full_k_outputs(config, quant_config)
+        if full_k_output:
+            self.o_proj = FullKParallelLinear(
+                self.total_num_heads * self.head_dim,
+                config.hidden_size,
+                tp_rank=self.attn_tp_rank,
+                tp_size=self.attn_tp_size,
+                tp_group=self.attn_tp_group,
+                params_dtype=None,
+                prefix=add_prefix("o_proj", prefix),
+            )
+        else:
+            self.o_proj = RowParallelLinear(
+                self.total_num_heads * self.head_dim,
+                config.hidden_size,
+                bias=False,
+                quant_config=attn_quant_config,
+                reduce_results=False,
+                tp_rank=self.attn_tp_rank,
+                tp_size=self.attn_tp_size,
+                tp_group=self.attn_tp_group,
+                prefix=add_prefix("o_proj", prefix),
+            )
 
         self.q_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = GemmaRMSNorm(self.head_dim, eps=config.rms_norm_eps)
@@ -848,7 +916,12 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
 
         # Dense MLP for non-MoE variant
         if config.model_type == "qwen3_5_text":
-            self.mlp = Qwen3_5MoeMLP(
+            mlp_cls = (
+                Qwen3_5FullKMLP
+                if _use_full_k_outputs(config, quant_config)
+                else Qwen3_5MoeMLP
+            )
+            self.mlp = mlp_cls(
                 parallelism="dense",
                 mapping=self.mapping,
                 hidden_size=config.hidden_size,
@@ -878,15 +951,14 @@ class Qwen3_5AttentionDecoderLayer(nn.Module):
         )
 
         self.is_moe = is_moe
-        self.comm_manager = CommManager(
-            mapping=self.mapping,
-            layer_id=self.layer_id,
-            is_moe=is_moe,
-            prev_is_moe=is_moe,
-            dense_batch_invariant=False,
-            input_layernorm=self.input_layernorm,
-            post_attn_layernorm=self.post_attention_layernorm,
-            query_sharded=False,
+        self.comm_manager = _make_comm_manager(
+            config,
+            self.mapping,
+            self.layer_id,
+            is_moe,
+            quant_config,
+            self.input_layernorm,
+            self.post_attention_layernorm,
         )
 
     def _project_qkv(

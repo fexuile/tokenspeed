@@ -23,7 +23,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 import torch
 from tokenspeed_kernel.ops.activation.triton import (
@@ -49,6 +49,7 @@ from tokenspeed.runtime.layers.activation import SiluAndMul
 from tokenspeed.runtime.layers.dense.mxfp4 import Mxfp4LinearMethod
 from tokenspeed.runtime.layers.dense.nvfp4 import Nvfp4LinearMethod
 from tokenspeed.runtime.layers.linear import (
+    FullKParallelLinear,
     MergedColumnParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -107,6 +108,8 @@ def _gate_up_quant_config(
 
 
 class Qwen3_5MoeMLP(nn.Module):
+    _full_k_output: ClassVar[bool] = False
+
     def __init__(
         self,
         hidden_size: int,
@@ -140,6 +143,15 @@ class Qwen3_5MoeMLP(nn.Module):
         """
         super().__init__()
         self.mapping = mapping
+        if self._full_k_output and (
+            parallelism != "dense"
+            or quant_config is not None
+            or replicate_weights
+            or reduce_results
+        ):
+            raise ValueError(
+                "Full-K MLP output requires unquantized dense TP with an external communication tail"
+            )
         gate_up_quant_config = _gate_up_quant_config(
             quant_config, add_prefix("gate_up_proj", prefix)
         )
@@ -164,6 +176,26 @@ class Qwen3_5MoeMLP(nn.Module):
                 quant_config=gate_up_quant_config,
                 prefix=add_prefix("gate_up_proj", prefix),
             )
+        else:
+            self.gate_up_proj = ReplicatedLinear(
+                hidden_size,
+                intermediate_size * 2,
+                bias=False,
+                quant_config=gate_up_quant_config,
+                prefix=add_prefix("gate_up_proj", prefix),
+            )
+
+        if self._full_k_output:
+            self.down_proj = FullKParallelLinear(
+                intermediate_size,
+                hidden_size,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+                tp_group=tp_group,
+                params_dtype=None,
+                prefix=add_prefix("down_proj", prefix),
+            )
+        elif tp_size > 1 and not replicate_weights:
             self.down_proj = RowParallelLinear(
                 intermediate_size,
                 hidden_size,
@@ -176,13 +208,6 @@ class Qwen3_5MoeMLP(nn.Module):
                 prefix=add_prefix("down_proj", prefix),
             )
         else:
-            self.gate_up_proj = ReplicatedLinear(
-                hidden_size,
-                intermediate_size * 2,
-                bias=False,
-                quant_config=gate_up_quant_config,
-                prefix=add_prefix("gate_up_proj", prefix),
-            )
             self.down_proj = ReplicatedLinear(
                 intermediate_size,
                 hidden_size,
@@ -235,6 +260,8 @@ class Qwen3_5MoeMLP(nn.Module):
     ) -> torch.Tensor:
         """``forward(x)``, taking gate_up_proj's NVFP4 input from its producer when given."""
         if x.shape[0] == 0:
+            if self._full_k_output:
+                return x.new_empty((0, self.down_proj.output_size_per_partition))
             return x
         if self._use_nvfp4_gemm_swiglu_nvfp4_quant:
             x_fc1_fp4, x_fc1_scale = (
@@ -274,6 +301,12 @@ class Qwen3_5MoeMLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
+
+
+class Qwen3_5FullKMLP(Qwen3_5MoeMLP):
+    """Unquantized dense MLP with complete output-channel partitioning."""
+
+    _full_k_output = True
 
 
 class Qwen3_5MoeSparseMoeBlock(nn.Module):
