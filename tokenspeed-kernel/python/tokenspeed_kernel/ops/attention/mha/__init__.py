@@ -140,7 +140,9 @@ def mha_plan(
           "postwrite" means prefill attends the new K/V rows directly;
           "prewrite" means extend attention reads them from the KV cache.
     """
-    if dtype == torch.float8_e4m3fn:
+    # Ascend's dense and paged native attention round differently at D=256.
+    # Keep fresh requests on the same cache-backed leaf as prefixed neighbors.
+    if dtype == torch.float8_e4m3fn or current_platform().is_npu:
         return {"extend_mode": "prewrite"}
 
     traits = {
