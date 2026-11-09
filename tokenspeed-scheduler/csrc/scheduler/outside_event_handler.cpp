@@ -113,9 +113,8 @@ std::optional<WriteBackOperation> Scheduler::publishCompletedPages(Request& requ
     // holds the state after the last consumed token and the KV rows below it
     // are complete.
     const std::int32_t num_computed_tokens = request.NumComputedTokens();
-    RequestProgress completed =
-        AdvanceRequestProgress(request, progress, num_computed_tokens, coordinator_.PrefixGranularity(),
-                               /*stream_completed_to_host=*/false, PublicationPoint::kFinal);
+    RequestProgress completed = advanceRequestProgress(request, progress, num_computed_tokens,
+                                                       /*stream_completed_to_host=*/false, PublicationPoint::kFinal);
     std::vector<std::string> store_hashes = progress.prefix_hashes;
     if (completed.completed_pages) {
         registerKvEventPublication(request, progress.prefix_hashes, *completed.completed_pages);

@@ -476,12 +476,21 @@ def _drive_k3_to_retract(scheduler) -> tuple[object, dict[str, list[int]]]:
     return snapshot, a_rows
 
 
-def test_k3_retraction_images_every_group_and_restores_it_in_place() -> None:
-    """Without L2 the whole image lives in the snapshot pool; the restore
-    copies it back into fresh pages and decode resumes where it stopped."""
+@pytest.mark.parametrize(
+    "prefix_cache_enabled,host_cache", [(True, False), (False, False), (False, True)]
+)
+def test_k3_retraction_images_every_group_and_restores_it_in_place(
+    prefix_cache_enabled: bool, host_cache: bool
+) -> None:
+    """Private history and state use the snapshot pool and resume on restore.
+
+    Without prefix caching, an available Host L2 must not publish these blocks
+    or replace them with another request's canonical history.
+    """
     cfg = _make_k3_config()
-    assert cfg.num_host_pages == 0
-    assert cfg.disable_l2_cache
+    cfg.disable_prefix_cache = not prefix_cache_enabled
+    cfg.num_host_pages = 33 if host_cache else 0
+    cfg.disable_l2_cache = not host_cache
     cfg.num_snapshot_pages = 33
     cfg.max_retracted_requests = 4
     scheduler = ts.Scheduler(cfg)

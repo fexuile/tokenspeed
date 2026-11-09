@@ -47,6 +47,8 @@
 
 namespace tokenspeed {
 
+enum class PublicationPoint;
+
 class Scheduler {
 public:
     explicit Scheduler(SchedulerConfig config);
@@ -383,6 +385,11 @@ private:
     // The first half of a retraction: publishes the pages the victim completed
     // since its last admission (see forward.cpp).
     void publishCompletedPrefix(Request& victim);
+    // Respect the scheduler's existing cache policy before hashing or publishing.
+    // Disabling lookup alone would still deduplicate the request's live history.
+    RequestProgress advanceRequestProgress(const Request& request, fsm::CacheProgress& cache_progress,
+                                           std::int32_t num_computed_tokens, bool stream_completed_to_host,
+                                           PublicationPoint point) const;
     // Whether the host budgets hold the request's image right now: a blob
     // slot is free and the snapshot pool holds everything the L2 leg would
     // not carry once the retraction has published the request's completed
