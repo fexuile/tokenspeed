@@ -23,6 +23,7 @@ import torch
 
 torch_npu = pytest.importorskip("torch_npu")
 
+from tokenspeed_kernel.ops.layernorm import qk_rmsnorm
 from tokenspeed_kernel_npu.ops.layernorm import rmsnorm
 
 pytestmark = pytest.mark.skipif(
@@ -62,3 +63,63 @@ def test_add_rmsnorm_updates_residual(dtype: torch.dtype) -> None:
     assert residual_out is residual
     torch.testing.assert_close(residual, expected_residual, atol=0, rtol=0)
     torch.testing.assert_close(result, expected, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("weight_offset", [0.0, 1.0])
+@pytest.mark.parametrize("head_shape", [(7, 4 * 256), (7, 4, 256)])
+def test_qk_rmsnorm_keeps_affine_in_fp32(dtype, weight_offset, head_shape):
+    # Packed Q/K views must retain their rows while every head normalizes alone.
+    generator = torch.Generator().manual_seed(57)
+    packed = torch.randn(7, 8 * 256, generator=generator, dtype=dtype).to("npu")
+    q = packed[:, : 4 * 256].view(head_shape)
+    k = packed[:, 4 * 256 : 6 * 256]
+    weights = [
+        (torch.randn(256, generator=generator) * 0.2).to(dtype).to("npu")
+        for _ in range(2)
+    ]
+    originals = [x.cpu().clone() for x in (q, k)]
+    expected = [
+        _reference(x.reshape(-1, 256), w.float() + weight_offset, 1e-6)
+        .reshape(x.shape)
+        .cpu()
+        for x, w in zip((q, k), weights, strict=True)
+    ]
+
+    outputs = qk_rmsnorm(q, k, *weights, 1e-6, weight_offset=weight_offset)
+
+    for actual, reference, original, source in zip(
+        outputs, expected, originals, (q, k), strict=True
+    ):
+        assert actual.shape == source.shape and actual.dtype == dtype
+        torch.testing.assert_close(actual.cpu(), reference, atol=0, rtol=0)
+        torch.testing.assert_close(source.cpu(), original, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("q_heads,k_heads", [(4, 2), (8, 4)])
+def test_qk_rmsnorm_does_not_depend_on_other_rows(q_heads, k_heads):
+    generator = torch.Generator().manual_seed(97)
+    q = torch.randn(128, q_heads * 256, generator=generator, dtype=torch.bfloat16).to(
+        "npu"
+    )
+    k = torch.randn(128, k_heads * 256, generator=generator, dtype=torch.bfloat16).to(
+        "npu"
+    )
+    weights = [
+        (torch.randn(256, generator=generator) * 0.1).to(device="npu", dtype=q.dtype)
+        for _ in range(2)
+    ]
+    packed = qk_rmsnorm(q, k, *weights, 1e-6, weight_offset=1.0)
+    for start in (0, 7, 119):
+        for rows in (1, 2, 7):
+            alone = qk_rmsnorm(
+                q[start : start + rows],
+                k[start : start + rows],
+                *weights,
+                1e-6,
+                weight_offset=1.0
+            )
+            for actual, reference in zip(alone, packed, strict=True):
+                torch.testing.assert_close(
+                    actual, reference[start : start + rows], atol=0, rtol=0
+                )

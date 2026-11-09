@@ -36,8 +36,5 @@ def qk_rmsnorm(
     *,
     weight_offset: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """The NPU per-head norm, with ``weight_offset + weight`` formed in the weight dtype."""
-    if weight_offset:
-        q_weight = (q_weight.float() + weight_offset).to(q_weight.dtype)
-        k_weight = (k_weight.float() + weight_offset).to(k_weight.dtype)
-    return _npu_qk_rmsnorm(q, k, q_weight, k_weight, eps)
+    """The NPU per-head norm, with FP32 statistics and affine arithmetic."""
+    return _npu_qk_rmsnorm(q, k, q_weight, k_weight, eps, weight_offset=weight_offset)

@@ -125,7 +125,7 @@ def qk_rmsnorm(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Apply the platform per-head Q/K RMSNorm implementation; heads scale by
     ``weight_offset + weight`` (1.0 for Gemma-style weights), formed in fp32
-    except on Ascend, which rounds it to the weight dtype."""
+    before the output is rounded to the activation dtype."""
     return _qk_rmsnorm(q, k, q_weight, k_weight, eps, weight_offset=weight_offset)
 
 

@@ -56,10 +56,20 @@ def qk_rmsnorm(
     q_weight: torch.Tensor,
     k_weight: torch.Tensor,
     eps: float,
-    enable_pdl: bool = False,
+    *,
+    weight_offset: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply per-head RMSNorm to query and key tensors."""
-    del enable_pdl
+    """Normalize Q/K heads in FP32 and round each affine result once.
+
+    Args:
+        q, k: Packed or head-shaped query/key rows with dense head channels.
+        q_weight, k_weight: Raw per-head affine weights.
+        eps: Epsilon added to each head's mean square.
+        weight_offset: Offset added in FP32 (1.0 for Gemma-style weights).
+
+    Returns:
+        Normalized Q/K with their original shapes and dtypes.
+    """
     head_dim = q_weight.numel()
     if k_weight.numel() != head_dim:
         raise ValueError("q and k weights must have the same head dimension")
@@ -69,10 +79,13 @@ def qk_rmsnorm(
     q_shape, k_shape = q.shape, k.shape
     q_heads = q.reshape(-1, q.shape[-1] // head_dim, head_dim)
     k_heads = k.reshape(-1, k.shape[-1] // head_dim, head_dim)
-    q_scale = torch.rsqrt(q_heads.float().square().mean(-1, keepdim=True) + eps)
-    k_scale = torch.rsqrt(k_heads.float().square().mean(-1, keepdim=True) + eps)
-    q_out = (q_heads * q_scale.to(q.dtype) * q_weight).reshape(q_shape)
-    k_out = (k_heads * k_scale.to(k.dtype) * k_weight).reshape(k_shape)
+    q_float, k_float = q_heads.float(), k_heads.float()
+    q_scale = torch.rsqrt(q_float.square().mean(-1, keepdim=True) + eps)
+    k_scale = torch.rsqrt(k_float.square().mean(-1, keepdim=True) + eps)
+    # Qwen's Gemma-style affine keeps both the offset and RMS scale in FP32.
+    q_out = (q_float * q_scale * (q_weight.float() + weight_offset)).to(q.dtype)
+    k_out = (k_float * k_scale * (k_weight.float() + weight_offset)).to(k.dtype)
+    q_out, k_out = q_out.reshape(q_shape), k_out.reshape(k_shape)
     return q_out, k_out
 
 
