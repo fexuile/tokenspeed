@@ -144,7 +144,7 @@ def test_logits_processor_only_uses_fused_lm_head_for_kimi(monkeypatch):
     monkeypatch.setattr(
         logits_processor_module,
         "current_platform",
-        lambda: SimpleNamespace(is_amd=False, is_nvidia=is_nvidia),
+        lambda: SimpleNamespace(is_amd=False, is_nvidia=is_nvidia, is_npu=False),
     )
 
     non_kimi = LogitsProcessor(

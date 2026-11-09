@@ -1064,7 +1064,7 @@ class LogitsProcessor(nn.Module):
                 )
             else:
                 cast_hidden = hidden_states.to(lm_head.weight.dtype)
-                if current_platform().is_amd:
+                if current_platform().is_amd or current_platform().is_npu:
                     logits = kernel_mm(cast_hidden, lm_head.weight)
                 elif self._use_fused_lm_head:
                     logits = _lm_head_matmul(cast_hidden, lm_head.weight)

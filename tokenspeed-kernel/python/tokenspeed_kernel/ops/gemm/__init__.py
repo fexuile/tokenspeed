@@ -172,6 +172,7 @@ _KERNELS_WITH_FUSED_BIAS: frozenset[str] = frozenset(
     {
         "torch_bmm",
         "torch_mm",
+        "ascend_triton_mm",
         "triton_mm_fp8_scaled",
     }
 )
@@ -499,7 +500,12 @@ def plan_dense_gemm(
     """
     if mode not in ("mm", "bmm") or (mode == "bmm") != (batch_size is not None):
         raise ValueError("Dense GEMM planning requires mm or bmm with its group count")
-    traits = {"n": output_size, "k": input_size, "out_dtype": dtype}
+    traits = {
+        "n": output_size,
+        "k": input_size,
+        "out_dtype": dtype,
+        "device_type": torch.get_default_device().type,
+    }
     if batch_size is not None:
         traits["batch"] = batch_size
     return KernelPlan.select(
@@ -702,6 +708,7 @@ def mm(
         "n": N,
         "k": K,
         "b_layout": b_layout,
+        "device_type": A.device.type,
         "a_inner_stride_one": A.stride(-1) == 1,
         "a_scales_inner_stride_one": (A_scales is None or A_scales.stride(-1) == 1),
         "b_inner_stride_one": B.stride(-1) == 1,
@@ -881,6 +888,7 @@ def bmm(
         "m": M,
         "n": N,
         "k": K,
+        "device_type": A.device.type,
         "a_inner_stride_one": A.stride(-1) == 1,
         "b_n_stride_one": B.stride(1) == 1,
         "out_dtype": out_dtype,
@@ -3725,6 +3733,7 @@ def kimi3_router_projection(
 # Backend registration (side-effect imports)
 # isort: off
 import tokenspeed_kernel.numerics.torch.gemm  # noqa: E402,F401
+import tokenspeed_kernel.ops.gemm.ascend  # noqa: E402,F401
 import tokenspeed_kernel.ops.gemm.cuda  # noqa: E402,F401
 import tokenspeed_kernel.ops.gemm.deepgemm  # noqa: E402,F401
 import tokenspeed_kernel.ops.gemm.cute_dsl  # noqa: E402,F401
