@@ -19,6 +19,8 @@
 # SOFTWARE.
 
 """Interval accounting for simultaneous compute, collective and wait lanes."""
+
+
 def merge(intervals):
     result = []
     for start, end in sorted(intervals):
@@ -55,7 +57,10 @@ def account(compute, communication, waits, window):
     c = intersect(compute, [window])
     m = intersect(communication, [window])
     overlap = measure(intersect(c, m))
-    return dict(compute_us=measure(c), communication_us=measure(m),
-                overlap_us=overlap,
-                communication_wait_us=measure(intersect(waits, m)),
-                uncovered_us=window[1] - window[0] - measure(c + m))
+    return dict(
+        compute_us=measure(c),
+        communication_us=measure(m),
+        overlap_us=overlap,
+        communication_wait_us=measure(intersect(waits, m)),
+        uncovered_us=window[1] - window[0] - measure(c + m),
+    )

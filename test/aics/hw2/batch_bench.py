@@ -104,10 +104,13 @@ def main():
     args = parser.parse_args()
 
     from transformers import AutoTokenizer
+
     from tokenspeed.runtime.entrypoints.engine import Engine
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
-    source = tokenizer.encode("春天来了，校园里开满了鲜花。" * 700, add_special_tokens=False)
+    source = tokenizer.encode(
+        "春天来了，校园里开满了鲜花。" * 700, add_special_tokens=False
+    )
     if args.max_total_tokens < 2 * max(args.input_lengths) + 32:
         parser.error("max-total-tokens must fit two requests and 32 generated tokens")
     engine = Engine(**options(args.model, args.tp, args.max_total_tokens))
@@ -146,7 +149,9 @@ def main():
                 batch=2,
                 repeats=len(values),
                 e2e_ms=statistics.mean(values) * 1000,
-                e2e_stdev_ms=(statistics.stdev(values) * 1000 if len(values) > 1 else 0),
+                e2e_stdev_ms=(
+                    statistics.stdev(values) * 1000 if len(values) > 1 else 0
+                ),
                 output_tok_s=64 / statistics.mean(values),
             )
             rows.append(row)
